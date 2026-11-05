@@ -1,6 +1,6 @@
 {
   "name": "dsh-deepseek-web",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "One-click DeepSeek Web in the DeepSeek Harness sidebar: opens chat.deepseek.com in the built-in Browser, fullscreen.",
   "type": "module",
   "main": "index.js",
@@ -61,5 +61,6 @@
     "access": "public"
   }
 }
+
 
 

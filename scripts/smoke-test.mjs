@@ -23,7 +23,7 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const source = await readFile(join(root, 'client.js'), 'utf8');
 
 /** Build a fresh sandbox + fake host for one scenario. */
-function run({ stored, sessionIds }) {
+function run({ stored, sessionIds, activeTab }) {
   let factory;
   const order = [];
   const store = new Map();
@@ -101,7 +101,10 @@ function run({ stored, sessionIds }) {
       }
       if (name === 'sidebarRightTabs') return { get: kind => (kind === 'browser' ? {} : undefined) };
       if (name === 'sidebarRight') {
-        return { openTab: (kind, options) => order.push(['openTab', kind, options.params.url]) };
+        return {
+          openTab: (kind, options) => order.push(['openTab', kind, options.params.url]),
+          active: () => activeTab,
+        };
       }
       return undefined;
     },
@@ -172,6 +175,18 @@ assert.deepEqual([...pluginInject], ['slots', 'layout']);
     ['openTab', 'browser', 'https://chat.deepseek.com/'],
     ['fullscreen'],
   ], 'a deleted Session is recreated rather than opened');
+}
+
+// --- D. clicked again while a Browser page is already showing ---------------
+{
+  const { order, ctx } = run({ stored: 's9', sessionIds: ['s1', 's9'], activeTab: { kind: 'browser' } });
+  ctx.layout.selectPanel('deepseek-web');
+  assert.deepEqual(order, [
+    ['selectPanel', 'deepseek-web'],
+    ['selectPanel', null],
+    ['openSession', 's9'],
+    ['fullscreen'], // no second Browser page
+  ], 're-clicking returns to the page instead of stacking another');
 }
 
 console.log('smoke test passed');

@@ -226,6 +226,27 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * Whether a Browser page is already the right column's active tab.
+     *
+     * The Browser type registers with `multiple: true`, so `openTab` never
+     * deduplicates it — asking twice puts two pages side by side. Clicking the
+     * row again should return to the page that is already there, not stack one
+     * more.
+     * @param ctx - client root context.
+     * @returns whether a Browser page is showing.
+     */
+    function browserIsShowing(ctx) {
+      try {
+        const right = ctx.get('sidebarRight');
+        const tab = right?.active?.();
+        return tab !== null && typeof tab === 'object' && tab.kind === 'browser';
+      } catch {
+        // No active tab readable: assume not showing.
+        return false;
+      }
+    }
+
+    /**
      * Jump to the dedicated Session and make sure its Browser tab is up.
      * @param ctx - client root context.
      */
@@ -242,6 +263,11 @@ window.__ModuleLoader__.load({
         // rather than open the tab before a Session is on screen (that throws).
         let attempts = 0;
         const tryOpen = () => {
+          // Already there? Return to it instead of stacking another page.
+          if (browserIsShowing(ctx)) {
+            expandToFullscreen();
+            return;
+          }
           if (openInBrowser(ctx)) {
             expandToFullscreen();
             return;

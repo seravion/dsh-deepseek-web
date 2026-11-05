@@ -1,0 +1,5 @@
+# The plugin is one row: the Host half is empty (no tools, no services), so the
+# whole feature lives in the browser half (./client.js).
+- insert:
+    - id: deepseek-web
+      name: dsh-deepseek-web

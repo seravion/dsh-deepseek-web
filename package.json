@@ -1,0 +1,63 @@
+{
+  "name": "dsh-deepseek-web",
+  "version": "0.1.0",
+  "description": "A one-click DeepSeek Web launcher in the DeepSeek Harness left sidebar: click the row, chat.deepseek.com opens in the built-in Browser.",
+  "type": "module",
+  "main": "index.js",
+  "icon": "./icon.svg",
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "deepseek",
+    "launcher",
+    "browser"
+  ],
+  "author": "seravion",
+  "license": "MIT",
+  "homepage": "https://github.com/seravion/dsh-deepseek-web#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/seravion/dsh-deepseek-web.git"
+  },
+  "bugs": {
+    "url": "https://github.com/seravion/dsh-deepseek-web/issues"
+  },
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./icon": "./icon.svg",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "icon.svg",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "dsh": ">=0.1.7"
+  },
+  "scripts": {
+    "test": "node scripts/smoke-test.mjs"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-sidebar",
+        "@deepseek-ai/dsh-client-ui-layout"
+      ]
+    }
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

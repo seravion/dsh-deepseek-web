@@ -2,23 +2,29 @@
  * dsh-deepseek-web — browser half.
  *
  * Adds one row to the left sidebar's global panel list (the row list that holds
- * Plugins / Automation tasks). Clicking it opens https://chat.deepseek.com/ in
- * the Harness built-in Browser and switches that column to fullscreen, so the
- * page takes the whole window instead of the 45% side track.
+ * Plugins / Automation tasks). Clicking it puts chat.deepseek.com on screen in
+ * the Harness built-in Browser, fullscreen, inside **one dedicated Session** —
+ * so the page keeps running while the user works in other Sessions, and the
+ * next click jumps straight back to it.
  *
- * Why the row cannot just render the page itself: the Desktop main process
- * validates every `<webview>` against a lease it issued (see
- * `will-attach-webview` — no lease means `event.preventDefault()`), and an
- * `<iframe>` is refused by the site's framing policy. The built-in Browser is
- * the only surface a plugin can put a third-party page on, and it is
- * session-scoped: its commands throw while no Session is on screen. Hence the
- * selection hook below — it restores the previous main panel first, so a
- * Session is mounted by the time the Browser is asked for a tab.
+ * Why a dedicated Session: the right column is per-Session (its store is keyed
+ * by session id), so a tab opened in the Session on screen disappears from view
+ * the moment another Session is selected. One fixed Session gives the page a
+ * stable home. The id is remembered in localStorage; if the Session is deleted,
+ * the next click creates a fresh one.
+ *
+ * Why the row cannot render the page itself: the Desktop main process validates
+ * every `<webview>` against a lease it issued (`will-attach-webview` →
+ * `event.preventDefault()` without one), and an `<iframe>` is refused by the
+ * site's framing policy. The built-in Browser is the only surface a plugin can
+ * put a third-party page on.
  *
  * Documented surfaces used here:
  *   - `sidebar.panellist` slot, kind `list`             (the row)
  *   - `main` keyed slot                                 (the panel the row addresses)
  *   - `ctx.layout.panelInfo` / `selectPanel`            (selection interception)
+ *   - `ctx.uiWorkspace.openSession` / `startSession`    (the dedicated Session)
+ *   - `ctx.sessions.list`                               (does it still exist?)
  *   - `ctx.sidebarRight.openTab('browser', { params })` (the built-in Browser)
  */
 window.__ModuleLoader__.load({
@@ -33,17 +39,11 @@ window.__ModuleLoader__.load({
     const PANEL_ID = 'deepseek-web';
     /** The page the row opens. */
     const TARGET = 'https://chat.deepseek.com/';
+    /** localStorage key holding the dedicated Session id. */
+    const STORE_KEY = 'dsh-deepseek-web:session';
 
-    const zh = {
-      label: 'DeepSeek 网页',
-      opening: '正在打开 DeepSeek 网页版…',
-      external: '这个环境里无法内嵌，已用系统浏览器打开',
-    };
-    const en = {
-      label: 'DeepSeek Web',
-      opening: 'Opening DeepSeek Web…',
-      external: 'Cannot embed here — opened in your browser instead',
-    };
+    const zh = { label: 'DeepSeek 网页' };
+    const en = { label: 'DeepSeek Web' };
 
     /**
      * The row glyph: a globe, drawn at the edge the sidebar asks for.
@@ -70,6 +70,109 @@ window.__ModuleLoader__.load({
       );
     }
 
+    // --- dedicated Session ---------------------------------------------------
+
+    /** @returns the remembered Session id, or null. */
+    function readStored() {
+      try {
+        return window.localStorage.getItem(STORE_KEY);
+      } catch {
+        return null;
+      }
+    }
+
+    /** @param id - Session id to remember. */
+    function writeStored(id) {
+      try {
+        window.localStorage.setItem(STORE_KEY, id);
+      } catch {
+        // Storage may be denied; the Session is then found again only by luck.
+      }
+    }
+
+    /**
+     * The client's Session list store, when this composition serves one.
+     * @param ctx - client root context.
+     * @returns the store, or undefined.
+     */
+    function sessionList(ctx) {
+      try {
+        const service = ctx.get('sessions');
+        const list = service?.list ?? service;
+        if (list !== undefined && typeof list.getSnapshot === 'function') return list;
+      } catch {
+        // No Session service here.
+      }
+      return undefined;
+    }
+
+    /** @returns every known Session id. */
+    function sessionIds(list) {
+      try {
+        const snapshot = list.getSnapshot();
+        const rows = Array.isArray(snapshot)
+          ? snapshot
+          : snapshot?.sessions ?? snapshot?.items ?? snapshot?.list ?? [];
+        return rows.map(row => row?.id).filter(id => typeof id === 'string');
+      } catch {
+        return [];
+      }
+    }
+
+    /**
+     * Resolve the dedicated Session, creating it on first use.
+     *
+     * Calls back with its id, or with `undefined` when this composition cannot
+     * create one — the caller then simply uses the Session on screen.
+     * @param ctx - client root context.
+     * @param done - receives the id, or undefined.
+     */
+    function ensureDedicated(ctx, done) {
+      const list = sessionList(ctx);
+      const stored = readStored();
+      if (stored !== null && (list === undefined || sessionIds(list).includes(stored))) {
+        done(stored);
+        return;
+      }
+      const workspace = ctx.get('uiWorkspace');
+      if (workspace === undefined || typeof workspace.startSession !== 'function' || list === undefined) {
+        done(undefined);
+        return;
+      }
+      const before = new Set(sessionIds(list));
+      let settled = false;
+      let unsubscribe;
+      const finish = id => {
+        if (settled) return;
+        settled = true;
+        try {
+          unsubscribe?.();
+        } catch {
+          // The store may already be gone.
+        }
+        if (id !== undefined) writeStored(id);
+        done(id);
+      };
+      try {
+        unsubscribe = list.subscribe?.(() => {
+          const fresh = sessionIds(list).find(id => !before.has(id));
+          if (fresh !== undefined) finish(fresh);
+        });
+      } catch {
+        // Without a subscription the new id cannot be identified; fall back.
+      }
+      try {
+        workspace.startSession();
+      } catch {
+        finish(undefined);
+        return;
+      }
+      // Never leave the click hanging if the new Session is not identifiable.
+      window.setTimeout(() => finish(undefined), 2500);
+    }
+
+    // --- the browser ---------------------------------------------------------
+
     /** Last-resort opener: a plain browser tab. */
     function openExternal() {
       try {
@@ -80,7 +183,7 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * Ask the built-in Browser for a tab.
+     * Ask the built-in Browser for a tab in the Session on screen.
      * @param ctx - client root context.
      * @returns whether the Browser took the URL.
      */
@@ -93,20 +196,19 @@ window.__ModuleLoader__.load({
         right.openTab('browser', { params: { url: TARGET } });
         return true;
       } catch {
-        // No Session on screen, or no Browser in this composition.
+        // No Session on screen yet, or no Browser in this composition.
         return false;
       }
     }
 
     /**
-     * Move the just-opened panel from the 45% track to fullscreen through the
-     * panel's own display-mode control. That control is the documented UI for
-     * the action; the service's `toggleFullscreen` wants an internal pane target
-     * a plugin never holds, so the control itself is driven.
+     * Move the opened panel from the 45% track to fullscreen through the panel's
+     * own display-mode control. That control is the documented UI for the
+     * action; the service's `toggleFullscreen` wants an internal pane target a
+     * plugin never holds, so the control itself is driven.
      *
-     * The tab mounts asynchronously, so poll briefly. The attribute names the
-     * action the button would perform: `fullscreen` means "expand next", so an
-     * already-fullscreen panel is left alone.
+     * The attribute names the action the button would perform: `fullscreen`
+     * means "expand next", so an already-fullscreen panel is left alone.
      */
     function expandToFullscreen() {
       const selector = '[data-sidebar-right-mode="fullscreen"]';
@@ -117,10 +219,41 @@ window.__ModuleLoader__.load({
           control.click();
           return;
         }
-        if (++tries > 40) return; // ~2s, then leave the panel as it is
+        if (++tries > 60) return; // ~3s, then leave the panel as it is
         window.setTimeout(tick, 50);
       };
       tick();
+    }
+
+    /**
+     * Jump to the dedicated Session and make sure its Browser tab is up.
+     * @param ctx - client root context.
+     */
+    function launch(ctx) {
+      ensureDedicated(ctx, id => {
+        if (id !== undefined) {
+          try {
+            ctx.get('uiWorkspace').openSession(id);
+          } catch {
+            // Navigation refused; the tab still opens in the Session on screen.
+          }
+        }
+        // The navigation and the column's mount are asynchronous: retry briefly
+        // rather than open the tab before a Session is on screen (that throws).
+        let attempts = 0;
+        const tryOpen = () => {
+          if (openInBrowser(ctx)) {
+            expandToFullscreen();
+            return;
+          }
+          if (++attempts < 20) {
+            window.setTimeout(tryOpen, 100);
+            return;
+          }
+          openExternal();
+        };
+        window.setTimeout(tryOpen, id === undefined ? 0 : 200);
+      });
     }
 
     /** Shown only if the selection hook ever misses; keeps the row self-explanatory. */
@@ -184,9 +317,9 @@ window.__ModuleLoader__.load({
           yield ctx.slots.register({ name: 'main', key: PANEL_ID, locale: NS }, Placeholder);
         });
 
-        // The launcher. Order matters: restoring the previous panel FIRST puts a
-        // Session back on screen, because the Browser's commands throw while a
-        // global panel holds the main column.
+        // The launcher. Restoring the previous panel FIRST keeps a Session on
+        // screen, because the Browser's commands throw while a global panel
+        // holds the main column.
         ctx.effect(() => {
           const read = () => ctx.layout.panelInfo.getSnapshot().activePanelId;
           let previous = read();
@@ -208,11 +341,7 @@ window.__ModuleLoader__.load({
               return;
             }
             restore(previous);
-            if (!openInBrowser(ctx)) {
-              openExternal();
-              return;
-            }
-            expandToFullscreen();
+            launch(ctx);
           });
           return () => unsubscribe();
         }, 'deepseek-web: launcher');

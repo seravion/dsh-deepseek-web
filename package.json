@@ -1,7 +1,7 @@
 {
   "name": "dsh-deepseek-web",
-  "version": "0.2.0",
-  "description": "A one-click DeepSeek Web panel in the DeepSeek Harness left sidebar: click the row, chat.deepseek.com fills the main column.",
+  "version": "0.3.0",
+  "description": "One-click DeepSeek Web in the DeepSeek Harness sidebar: opens chat.deepseek.com in the built-in Browser, fullscreen.",
   "type": "module",
   "main": "index.js",
   "icon": "./icon.svg",
@@ -61,3 +61,4 @@
     "access": "public"
   }
 }
+

@@ -2,19 +2,24 @@
  * dsh-deepseek-web — browser half.
  *
  * Adds one row to the left sidebar's global panel list (the row list that holds
- * Plugins / Automation tasks). The row selects a **global main panel**, exactly
- * as the Plugins page does: the panel fills the centre column, needs no
- * Session, and works with no conversation open at all.
+ * Plugins / Automation tasks). Clicking it opens https://chat.deepseek.com/ in
+ * the Harness built-in Browser and switches that column to fullscreen, so the
+ * page takes the whole window instead of the 45% side track.
  *
- * The panel hosts the page itself. Desktop renders it in an Electron
- * `<webview>` (the main window enables the tag — the same element the built-in
- * Browser uses), which the page's `X-Frame-Options` cannot refuse. A plain
- * browser renders an `<iframe>`, and a site that refuses framing leaves the
- * toolbar's external-browser action as the way out.
+ * Why the row cannot just render the page itself: the Desktop main process
+ * validates every `<webview>` against a lease it issued (see
+ * `will-attach-webview` — no lease means `event.preventDefault()`), and an
+ * `<iframe>` is refused by the site's framing policy. The built-in Browser is
+ * the only surface a plugin can put a third-party page on, and it is
+ * session-scoped: its commands throw while no Session is on screen. Hence the
+ * selection hook below — it restores the previous main panel first, so a
+ * Session is mounted by the time the Browser is asked for a tab.
  *
  * Documented surfaces used here:
- *   - `sidebar.panellist` slot, kind `list`  (the row)
- *   - `main` keyed slot                      (the panel the row addresses)
+ *   - `sidebar.panellist` slot, kind `list`             (the row)
+ *   - `main` keyed slot                                 (the panel the row addresses)
+ *   - `ctx.layout.panelInfo` / `selectPanel`            (selection interception)
+ *   - `ctx.sidebarRight.openTab('browser', { params })` (the built-in Browser)
  */
 window.__ModuleLoader__.load({
   id: 'dsh-deepseek-web',
@@ -31,11 +36,13 @@ window.__ModuleLoader__.load({
 
     const zh = {
       label: 'DeepSeek 网页',
-      framed: '这个网页拒绝被嵌入显示，请用系统浏览器打开。',
+      opening: '正在打开 DeepSeek 网页版…',
+      external: '这个环境里无法内嵌，已用系统浏览器打开',
     };
     const en = {
       label: 'DeepSeek Web',
-      framed: 'This page refuses to be framed — open it in your browser.',
+      opening: 'Opening DeepSeek Web…',
+      external: 'Cannot embed here — opened in your browser instead',
     };
 
     /**
@@ -63,136 +70,82 @@ window.__ModuleLoader__.load({
       );
     }
 
-    /** @returns whether this renderer can host an Electron `<webview>`. */
-    function hasWebview() {
-      try {
-        return !(document.createElement('webview') instanceof HTMLUnknownElement);
-      } catch {
-        return false;
-      }
-    }
-
     /** Last-resort opener: a plain browser tab. */
     function openExternal() {
       try {
         window.open(TARGET, '_blank', 'noopener,noreferrer');
       } catch {
-        // A blocked popup leaves the panel and its toolbar on screen.
+        // A blocked popup leaves the placeholder panel on screen.
       }
     }
 
     /**
-     * The full-page panel. Fills the centre column; no Session is involved.
-     * @returns the panel element tree.
+     * Ask the built-in Browser for a tab.
+     * @param ctx - client root context.
+     * @returns whether the Browser took the URL.
      */
-    function DeepSeekPanel() {
-      const host = React.useRef(null);
-      const [failed, setFailed] = React.useState(false);
+    function openInBrowser(ctx) {
+      try {
+        const tabs = ctx.get('sidebarRightTabs');
+        if (tabs === undefined || tabs.get('browser') === undefined) return false;
+        const right = ctx.get('sidebarRight');
+        if (right === undefined || typeof right.openTab !== 'function') return false;
+        right.openTab('browser', { params: { url: TARGET } });
+        return true;
+      } catch {
+        // No Session on screen, or no Browser in this composition.
+        return false;
+      }
+    }
 
-      React.useEffect(() => {
-        const node = host.current;
-        if (node === null) return undefined;
-        // Built imperatively: a <webview> must be attached with its attributes
-        // already set, or the guest never starts.
-        if (hasWebview()) {
-          const view = document.createElement('webview');
-          view.setAttribute('src', TARGET);
-          view.setAttribute('partition', 'persist:dsh-deepseek-web');
-          view.setAttribute('allowpopups', 'false');
-          view.style.cssText =
-            'position:absolute;inset:0;display:flex;width:100%;height:100%;border:0;background:#fff';
-          const onFail = event => {
-            // -3 is ABORTED, which a redirect fires; only real failures matter.
-            if (event && event.errorCode === -3) return;
-            setFailed(true);
-          };
-          view.addEventListener('did-fail-load', onFail);
-          node.appendChild(view);
-          return () => {
-            view.removeEventListener('did-fail-load', onFail);
-            view.remove();
-          };
+    /**
+     * Move the just-opened panel from the 45% track to fullscreen through the
+     * panel's own display-mode control. That control is the documented UI for
+     * the action; the service's `toggleFullscreen` wants an internal pane target
+     * a plugin never holds, so the control itself is driven.
+     *
+     * The tab mounts asynchronously, so poll briefly. The attribute names the
+     * action the button would perform: `fullscreen` means "expand next", so an
+     * already-fullscreen panel is left alone.
+     */
+    function expandToFullscreen() {
+      const selector = '[data-sidebar-right-mode="fullscreen"]';
+      let tries = 0;
+      const tick = () => {
+        const control = document.querySelector(selector);
+        if (control !== null) {
+          control.click();
+          return;
         }
-        const frame = document.createElement('iframe');
-        frame.setAttribute('src', TARGET);
-        frame.setAttribute('referrerpolicy', 'no-referrer');
-        frame.style.cssText =
-          'position:absolute;inset:0;width:100%;height:100%;border:0;background:#fff';
-        frame.addEventListener('error', () => setFailed(true));
-        node.appendChild(frame);
-        return () => {
-          frame.remove();
-        };
-      }, []);
-
-      const buttonStyle = {
-        cursor: 'pointer',
-        border: '1px solid var(--dsw-alias-border-secondary, rgba(127,127,127,.3))',
-        borderRadius: 999,
-        padding: '3px 12px',
-        background: 'transparent',
-        color: 'inherit',
-        font: 'inherit',
+        if (++tries > 40) return; // ~2s, then leave the panel as it is
+        window.setTimeout(tick, 50);
       };
+      tick();
+    }
 
+    /** Shown only if the selection hook ever misses; keeps the row self-explanatory. */
+    function Placeholder() {
       return h(
         'div',
         {
           style: {
             display: 'flex',
-            flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: 'center',
             height: '100%',
-            minHeight: 0,
-            background: 'var(--dsw-alias-bg-layer-1, #fff)',
-            color: 'var(--dsw-alias-label-primary)',
-            fontSize: 13,
+            minHeight: 200,
+            color: 'var(--dsw-alias-label-secondary)',
+            fontSize: 14,
           },
         },
-        h(
-          'div',
-          {
-            style: {
-              display: 'flex',
-              alignItems: 'center',
-              gap: 8,
-              padding: '6px 12px',
-              borderBottom: '1px solid var(--dsw-alias-border-secondary, rgba(127,127,127,.18))',
-              flex: 'none',
-            },
-          },
-          h(Glyph, { size: 14 }),
-          h('span', { style: { flex: 1, minWidth: 0, opacity: 0.75 } }, 'chat.deepseek.com'),
-          h('button', { type: 'button', onClick: openExternal, style: buttonStyle, title: 'chat.deepseek.com' }, '↗'),
-        ),
-        failed
-          ? h(
-              'div',
-              {
-                style: {
-                  display: 'flex',
-                  flexDirection: 'column',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  gap: 12,
-                  flex: 1,
-                  padding: 24,
-                  textAlign: 'center',
-                },
-              },
-              h('div', { style: { opacity: 0.7 } }, TARGET),
-              h('button', { type: 'button', onClick: openExternal, style: buttonStyle }, '↗ chat.deepseek.com'),
-            )
-          : h('div', {
-              ref: host,
-              style: { position: 'relative', flex: 1, minHeight: 0, overflow: 'hidden' },
-            }),
+        TARGET,
       );
     }
 
     return {
       inject: ['slots', 'layout'],
       /**
-       * Register the row and the panel it addresses.
+       * Register the row, the panel it addresses, and the selection hook.
        * @param ctx - client root context.
        */
       apply(ctx) {
@@ -225,11 +178,44 @@ window.__ModuleLoader__.load({
           ),
         );
 
-        // The panel. Selecting this id is exactly what the row's click does, so
-        // nothing has to intercept it: the panel simply stays on screen.
+        // A row addresses a main panel, so one must exist for the id — the
+        // sidebar's selectPanel(id) throws otherwise and the click does nothing.
         ctx.slots.inject('main', function* () {
-          yield ctx.slots.register({ name: 'main', key: PANEL_ID, locale: NS }, DeepSeekPanel);
+          yield ctx.slots.register({ name: 'main', key: PANEL_ID, locale: NS }, Placeholder);
         });
+
+        // The launcher. Order matters: restoring the previous panel FIRST puts a
+        // Session back on screen, because the Browser's commands throw while a
+        // global panel holds the main column.
+        ctx.effect(() => {
+          const read = () => ctx.layout.panelInfo.getSnapshot().activePanelId;
+          let previous = read();
+          const restore = id => {
+            try {
+              ctx.layout.selectPanel(id);
+            } catch {
+              try {
+                ctx.layout.selectPanel(null);
+              } catch {
+                // Both targets are gone; the placeholder panel stays reachable.
+              }
+            }
+          };
+          const unsubscribe = ctx.layout.panelInfo.subscribe(() => {
+            const active = read();
+            if (active !== PANEL_ID) {
+              previous = active;
+              return;
+            }
+            restore(previous);
+            if (!openInBrowser(ctx)) {
+              openExternal();
+              return;
+            }
+            expandToFullscreen();
+          });
+          return () => unsubscribe();
+        }, 'deepseek-web: launcher');
       },
     };
   },

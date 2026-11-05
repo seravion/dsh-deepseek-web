@@ -1,7 +1,7 @@
 {
   "name": "dsh-deepseek-web",
-  "version": "0.1.0",
-  "description": "A one-click DeepSeek Web launcher in the DeepSeek Harness left sidebar: click the row, chat.deepseek.com opens in the built-in Browser.",
+  "version": "0.2.0",
+  "description": "A one-click DeepSeek Web panel in the DeepSeek Harness left sidebar: click the row, chat.deepseek.com fills the main column.",
   "type": "module",
   "main": "index.js",
   "icon": "./icon.svg",

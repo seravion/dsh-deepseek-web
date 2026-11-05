@@ -1,10 +1,10 @@
 /**
- * Smoke test: load the browser half outside Harness and drive one click.
+ * Smoke test: load the browser half outside Harness and inspect what it mounts.
  *
- * The client module talks to six surfaces (module loader, slots, locale,
- * layout, sidebarRight, sidebarRightTabs); this file fakes exactly those and
- * asserts the click path: Browser tab opened with the DeepSeek URL, centre
- * column handed back, conversation never unmounted.
+ * The client module talks to four surfaces (module loader, slots, locale,
+ * layout); this file fakes exactly those and asserts the shipped shape: one
+ * sidebar row, one main panel under the same id, and no selection
+ * interception — the row's own click selects the panel.
  *
  *   node scripts/smoke-test.mjs
  */
@@ -20,9 +20,7 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 let factory;
 const requireStub = id => {
   if (id !== 'react') throw new Error(`unexpected require(${id})`);
-  return {
-    createElement: (type, props, ...children) => ({ type, props: props ?? {}, children }),
-  };
+  return { createElement: (type, props, ...children) => ({ type, props: props ?? {}, children }) };
 };
 const sandbox = {
   window: {
@@ -34,6 +32,10 @@ const sandbox = {
     },
     open: (...args) => sandbox.opened.push(args),
   },
+  document: {
+    createElement: () => ({ style: {}, setAttribute() {}, addEventListener() {} }),
+  },
+  HTMLUnknownElement: class HTMLUnknownElement {},
   console,
 };
 sandbox.opened = [];
@@ -48,11 +50,9 @@ const plugin = factory(requireStub);
 assert.deepEqual([...plugin.inject], ['slots', 'layout']);
 
 // --- harness doubles -------------------------------------------------------
-const slots = new Map(); // slot name -> registration
-const calls = { openTab: [], selectPanel: [], effects: [] };
-const listeners = new Set();
-let activePanelId = null;
-
+const registered = [];
+const effects = [];
+const touchedLayout = [];
 const ctxLocale = {
   register: () => () => {},
   bind: () => key => (key === 'label' ? 'DeepSeek 网页' : key),
@@ -61,80 +61,51 @@ const ctxLocale = {
 const ctx = {
   slots: {
     inject(name, installer) {
-      const install = () => {
-        const dispose = installer();
-        if (dispose && typeof dispose.next === 'function') {
-          // generator installer: run to its first yield
-          const first = dispose.next();
-          return () => first.value?.();
-        }
-        return dispose;
-      };
-      slots.set(name, install());
+      const dispose = installer();
+      // A generator installer runs to its first yield, like the host's.
+      if (dispose && typeof dispose.next === 'function') {
+        const first = dispose.next();
+        return () => first.value?.();
+      }
+      return dispose;
     },
     register(definition, component) {
-      calls[`register:${definition.name}`] = (calls[`register:${definition.name}`] ?? []).concat(definition);
+      registered.push({ definition, component });
       return () => {};
     },
   },
-  locale: ctxLocale,
   effect(fn, label) {
-    calls.effects.push(label);
+    effects.push(label);
     return fn();
   },
   get(name) {
     if (name === 'locale') return ctxLocale;
-    if (name === 'sidebarRightTabs') return { get: kind => (kind === 'browser' ? {} : undefined) };
-    if (name === 'sidebarRight') {
-      return { openTab: (kind, options) => calls.openTab.push([kind, options]) };
-    }
     return undefined;
   },
   layout: {
-    panelInfo: {
-      getSnapshot: () => ({ activePanelId }),
-      subscribe(fn) {
-        listeners.add(fn);
-        return () => listeners.delete(fn);
-      },
-    },
+    panelInfo: { getSnapshot: () => ({ activePanelId: null }), subscribe: () => () => {} },
     selectPanel(id) {
-      calls.selectPanel.push(id);
-      activePanelId = id;
-      if (id !== null && !slots.has('main')) {
-        throw new Error(`layout.selectPanel: main panel "${id}" is not registered`);
-      }
-      listeners.forEach(fn => fn());
+      touchedLayout.push(id);
     },
   },
 };
 
 plugin.apply(ctx);
 
-// --- the click -------------------------------------------------------------
-const rows = calls['register:sidebar.panellist'] ?? [];
+// --- assertions ------------------------------------------------------------
+const rows = registered.filter(r => r.definition.name === 'sidebar.panellist');
 assert.equal(rows.length, 1, 'exactly one sidebar row');
-assert.equal(rows[0].id, 'deepseek-web');
-assert.equal(rows[0].label(), 'DeepSeek 网页', 'label follows the bound dictionary');
-assert.equal(rows[0].order, 10);
+assert.equal(rows[0].definition.id, 'deepseek-web');
+assert.equal(rows[0].definition.order, 10);
+assert.equal(rows[0].definition.label(), 'DeepSeek 网页', 'label follows the bound dictionary');
+assert.equal(typeof rows[0].component, 'function');
 
-const panels = calls['register:main'] ?? [];
+const panels = registered.filter(r => r.definition.name === 'main');
 assert.equal(panels.length, 1, 'the addressed main panel is registered');
-assert.equal(panels[0].key, 'deepseek-web');
+assert.equal(panels[0].definition.key, 'deepseek-web', 'same id as the row');
+assert.equal(typeof panels[0].component, 'function', 'the panel renders a component, not null');
 
-// The sidebar's own onClick for a panel row, in order: select, then notify.
-ctx.layout.selectPanel('deepseek-web');
-
-assert.equal(calls.openTab.length, 1, 'one Browser tab opened');
-assert.equal(calls.openTab[0][0], 'browser');
-assert.equal(calls.openTab[0][1].params.url, 'https://chat.deepseek.com/');
-assert.deepEqual(calls.selectPanel, ['deepseek-web', null], 'centre handed back to the Conversation');
-assert.equal(sandbox.opened.length, 0, 'no external tab when the Browser takes it');
-
-// Second click from another panel restores that panel, not the Conversation.
-ctx.layout.selectPanel('plugins');
-calls.openTab.length = 0;
-ctx.layout.selectPanel('deepseek-web');
-assert.deepEqual(calls.selectPanel.slice(-2), ['deepseek-web', 'plugins']);
+assert.deepEqual(touchedLayout, [], 'no selection interception: the row click selects the panel');
+assert.equal(sandbox.opened.length, 0, 'nothing opens a browser tab on mount');
 
 console.log('smoke test passed');

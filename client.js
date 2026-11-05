@@ -2,17 +2,19 @@
  * dsh-deepseek-web — browser half.
  *
  * Adds one row to the left sidebar's global panel list (the row list that holds
- * Plugins / Automation tasks). A panel row addresses a main panel, so the click
- * cannot be re-bound: instead this module registers the main panel for its id
- * and intercepts the selection. The click therefore opens
- * https://chat.deepseek.com/ in the built-in Browser (right sidebar) and hands
- * the centre column straight back to whatever it was showing.
+ * Plugins / Automation tasks). The row selects a **global main panel**, exactly
+ * as the Plugins page does: the panel fills the centre column, needs no
+ * Session, and works with no conversation open at all.
  *
- * Everything here runs against documented client surfaces:
- *   - `sidebar.panellist`          slot, kind `list`   (the row itself)
- *   - `main`                       keyed slot          (the panel the row addresses)
- *   - `ctx.layout.panelInfo` / `selectPanel`           (selection interception)
- *   - `ctx.sidebarRight.openTab('browser', { params })` (the built-in Browser)
+ * The panel hosts the page itself. Desktop renders it in an Electron
+ * `<webview>` (the main window enables the tag — the same element the built-in
+ * Browser uses), which the page's `X-Frame-Options` cannot refuse. A plain
+ * browser renders an `<iframe>`, and a site that refuses framing leaves the
+ * toolbar's external-browser action as the way out.
+ *
+ * Documented surfaces used here:
+ *   - `sidebar.panellist` slot, kind `list`  (the row)
+ *   - `main` keyed slot                      (the panel the row addresses)
  */
 window.__ModuleLoader__.load({
   id: 'dsh-deepseek-web',
@@ -29,13 +31,11 @@ window.__ModuleLoader__.load({
 
     const zh = {
       label: 'DeepSeek 网页',
-      title: '打开 DeepSeek 网页版',
-      fallback: '在右侧栏打开失败，点这里用浏览器打开',
+      framed: '这个网页拒绝被嵌入显示，请用系统浏览器打开。',
     };
     const en = {
       label: 'DeepSeek Web',
-      title: 'Open DeepSeek Web',
-      fallback: 'The right sidebar did not take it — open it in a browser',
+      framed: 'This page refuses to be framed — open it in your browser.',
     };
 
     /**
@@ -63,21 +63,11 @@ window.__ModuleLoader__.load({
       );
     }
 
-    /**
-     * Open the target page in the built-in Browser when that tab type is served.
-     * @param ctx - client root context.
-     * @returns whether a Browser tab took the URL.
-     */
-    function openInBrowser(ctx) {
+    /** @returns whether this renderer can host an Electron `<webview>`. */
+    function hasWebview() {
       try {
-        const tabs = ctx.get('sidebarRightTabs');
-        if (tabs === undefined || tabs.get('browser') === undefined) return false;
-        const right = ctx.get('sidebarRight');
-        if (right === undefined || typeof right.openTab !== 'function') return false;
-        right.openTab('browser', { params: { url: TARGET } });
-        return true;
+        return !(document.createElement('webview') instanceof HTMLUnknownElement);
       } catch {
-        // No Browser in this composition: the caller falls back to a new tab.
         return false;
       }
     }
@@ -87,57 +77,122 @@ window.__ModuleLoader__.load({
       try {
         window.open(TARGET, '_blank', 'noopener,noreferrer');
       } catch {
-        // A blocked popup leaves the panel's own button on screen.
+        // A blocked popup leaves the panel and its toolbar on screen.
       }
     }
 
     /**
-     * Stand-in for the main panel the row addresses. The selection is normally
-     * intercepted before this ever paints; when it is not, the user still gets
-     * one button that opens the page.
+     * The full-page panel. Fills the centre column; no Session is involved.
+     * @returns the panel element tree.
      */
-    function LauncherPanel() {
+    function DeepSeekPanel() {
+      const host = React.useRef(null);
+      const [failed, setFailed] = React.useState(false);
+
+      React.useEffect(() => {
+        const node = host.current;
+        if (node === null) return undefined;
+        // Built imperatively: a <webview> must be attached with its attributes
+        // already set, or the guest never starts.
+        if (hasWebview()) {
+          const view = document.createElement('webview');
+          view.setAttribute('src', TARGET);
+          view.setAttribute('partition', 'persist:dsh-deepseek-web');
+          view.setAttribute('allowpopups', 'false');
+          view.style.cssText =
+            'position:absolute;inset:0;display:flex;width:100%;height:100%;border:0;background:#fff';
+          const onFail = event => {
+            // -3 is ABORTED, which a redirect fires; only real failures matter.
+            if (event && event.errorCode === -3) return;
+            setFailed(true);
+          };
+          view.addEventListener('did-fail-load', onFail);
+          node.appendChild(view);
+          return () => {
+            view.removeEventListener('did-fail-load', onFail);
+            view.remove();
+          };
+        }
+        const frame = document.createElement('iframe');
+        frame.setAttribute('src', TARGET);
+        frame.setAttribute('referrerpolicy', 'no-referrer');
+        frame.style.cssText =
+          'position:absolute;inset:0;width:100%;height:100%;border:0;background:#fff';
+        frame.addEventListener('error', () => setFailed(true));
+        node.appendChild(frame);
+        return () => {
+          frame.remove();
+        };
+      }, []);
+
+      const buttonStyle = {
+        cursor: 'pointer',
+        border: '1px solid var(--dsw-alias-border-secondary, rgba(127,127,127,.3))',
+        borderRadius: 999,
+        padding: '3px 12px',
+        background: 'transparent',
+        color: 'inherit',
+        font: 'inherit',
+      };
+
       return h(
         'div',
         {
           style: {
             display: 'flex',
             flexDirection: 'column',
-            alignItems: 'center',
-            justifyContent: 'center',
-            gap: 12,
             height: '100%',
-            minHeight: 220,
-            padding: 24,
+            minHeight: 0,
+            background: 'var(--dsw-alias-bg-layer-1, #fff)',
             color: 'var(--dsw-alias-label-primary)',
-            fontSize: 14,
+            fontSize: 13,
           },
         },
-        h(Glyph, { size: 32 }),
         h(
-          'button',
+          'div',
           {
-            type: 'button',
-            onClick: openExternal,
             style: {
-              cursor: 'pointer',
-              border: '1px solid var(--dsw-alias-border-secondary, rgba(127,127,127,.3))',
-              borderRadius: 999,
-              padding: '8px 18px',
-              background: 'var(--dsw-alias-interactive-bg-hover, transparent)',
-              color: 'inherit',
-              font: 'inherit',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 8,
+              padding: '6px 12px',
+              borderBottom: '1px solid var(--dsw-alias-border-secondary, rgba(127,127,127,.18))',
+              flex: 'none',
             },
           },
-          'chat.deepseek.com',
+          h(Glyph, { size: 14 }),
+          h('span', { style: { flex: 1, minWidth: 0, opacity: 0.75 } }, 'chat.deepseek.com'),
+          h('button', { type: 'button', onClick: openExternal, style: buttonStyle, title: 'chat.deepseek.com' }, '↗'),
         ),
+        failed
+          ? h(
+              'div',
+              {
+                style: {
+                  display: 'flex',
+                  flexDirection: 'column',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: 12,
+                  flex: 1,
+                  padding: 24,
+                  textAlign: 'center',
+                },
+              },
+              h('div', { style: { opacity: 0.7 } }, TARGET),
+              h('button', { type: 'button', onClick: openExternal, style: buttonStyle }, '↗ chat.deepseek.com'),
+            )
+          : h('div', {
+              ref: host,
+              style: { position: 'relative', flex: 1, minHeight: 0, overflow: 'hidden' },
+            }),
       );
     }
 
     return {
       inject: ['slots', 'layout'],
       /**
-       * Register the row, the panel it addresses, and the selection hook.
+       * Register the row and the panel it addresses.
        * @param ctx - client root context.
        */
       apply(ctx) {
@@ -170,41 +225,11 @@ window.__ModuleLoader__.load({
           ),
         );
 
-        // A row addresses a main panel, so one must exist for the id — otherwise
-        // the sidebar's selectPanel(id) throws and nothing happens at all.
+        // The panel. Selecting this id is exactly what the row's click does, so
+        // nothing has to intercept it: the panel simply stays on screen.
         ctx.slots.inject('main', function* () {
-          yield ctx.slots.register({ name: 'main', key: PANEL_ID }, LauncherPanel);
+          yield ctx.slots.register({ name: 'main', key: PANEL_ID, locale: NS }, DeepSeekPanel);
         });
-
-        // The launcher itself: watch the selection, open the page, hand the
-        // centre column back. Restoring inside the notification means React
-        // never paints the stand-in panel, and the Conversation is not remounted.
-        ctx.effect(() => {
-          const read = () => ctx.layout.panelInfo.getSnapshot().activePanelId;
-          let previous = read();
-          const restore = id => {
-            try {
-              ctx.layout.selectPanel(id);
-            } catch {
-              try {
-                ctx.layout.selectPanel(null);
-              } catch {
-                // Both targets are gone; the stand-in panel stays reachable.
-              }
-            }
-          };
-          const unsubscribe = ctx.layout.panelInfo.subscribe(() => {
-            const active = read();
-            if (active !== PANEL_ID) {
-              previous = active;
-              return;
-            }
-            const opened = openInBrowser(ctx);
-            restore(previous);
-            if (!opened) openExternal();
-          });
-          return () => unsubscribe();
-        }, 'deepseek-web: launcher');
       },
     };
   },
